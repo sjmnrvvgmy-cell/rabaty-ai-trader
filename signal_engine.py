@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pandas as pd
 
@@ -21,6 +22,58 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
         axis=1,
     ).max(axis=1)
     return tr.rolling(period).mean()
+
+
+def calculate_position_sizing(symbol: str, entry: float, sl: float) -> dict | None:
+    balance_raw = os.getenv("ACCOUNT_BALANCE", "").strip()
+    if not balance_raw:
+        return None
+
+    try:
+        balance = float(balance_raw)
+        risk_pct = float(os.getenv("RISK_PERCENT", "1.0"))
+    except ValueError:
+        return None
+
+    stop_dist = abs(float(entry) - float(sl))
+    if balance <= 0 or risk_pct <= 0 or stop_dist <= 0:
+        return None
+
+    risk_amount = balance * (risk_pct / 100.0)
+    sym = symbol.upper()
+
+    if sym.endswith("/USDT"):
+        units = risk_amount / stop_dist
+        contract_size = float(os.getenv("CRYPTO_LOT_SIZE", "1.0"))
+        lots = units / contract_size if contract_size > 0 else units
+        unit_label = (
+            f"Lot (1 Lot = {contract_size:g} {sym.split('/')[0]})"
+            if contract_size != 1.0
+            else f"{sym.split('/')[0]} Units"
+        )
+        return {
+            "risk_amount": risk_amount,
+            "risk_pct": risk_pct,
+            "lots": lots,
+            "unit_label": unit_label,
+        }
+
+    if sym.startswith("XAU"):
+        default_contract = 100.0
+    elif sym.startswith("XAG"):
+        default_contract = 5000.0
+    else:
+        default_contract = 100000.0
+
+    contract_size = float(os.getenv("CONTRACT_SIZE", str(default_contract)))
+    lots = risk_amount / (stop_dist * contract_size) if contract_size > 0 else 0.0
+
+    return {
+        "risk_amount": risk_amount,
+        "risk_pct": risk_pct,
+        "lots": lots,
+        "unit_label": "Lot",
+    }
 
 
 def analyze(df: pd.DataFrame, symbol: str, timeframe: str, min_score: int = 3) -> dict:
@@ -55,7 +108,6 @@ def analyze(df: pd.DataFrame, symbol: str, timeframe: str, min_score: int = 3) -
         score_sell += 1
         reasons_sell.append("زەبری RSI پاڵپشتی فرۆشتنە")
 
-    # شکاندنی پێکهاتەی کورت مەودا (BOS)
     if last.close > recent.high.max():
         score_buy += 2
         reasons_buy.append("شکاندنی بەرزایی پێشوو (BOS سەرەوە)")
@@ -63,7 +115,6 @@ def analyze(df: pd.DataFrame, symbol: str, timeframe: str, min_score: int = 3) -
         score_sell += 2
         reasons_sell.append("شکاندنی نزمترین نرخی پێشوو (BOS خوارەوە)")
 
-    # ڕاماڵینی سیولە (Liquidity Sweep)
     prior_high, prior_low = recent.high.max(), recent.low.min()
     if last.high > prior_high and last.close < prior_high:
         score_sell += 1
@@ -72,7 +123,6 @@ def analyze(df: pd.DataFrame, symbol: str, timeframe: str, min_score: int = 3) -
         score_buy += 1
         reasons_buy.append("ڕاماڵینی سیولەی خوارەوە (Liquidity Sweep)")
 
-    # بۆشایی نرخی دادپەروەرانە (FVG)
     if len(d) >= 3 and d.low.iloc[-1] > d.high.iloc[-3]:
         score_buy += 1
         reasons_buy.append("دروستبوونی FVG سەرەوە")
@@ -85,7 +135,6 @@ def analyze(df: pd.DataFrame, symbol: str, timeframe: str, min_score: int = 3) -
     if not np.isfinite(atr) or atr <= 0:
         raise ValueError("ATR unavailable; cannot calculate risk levels.")
 
-    # بۆ کورت مەودا SL و TP کەمێک نزیکتر و خێراتر ڕێک خراون
     sl_mult = 1.2 if timeframe in ("5m", "15m") else 1.5
 
     if score_buy >= min_score and score_buy > score_sell:
@@ -139,6 +188,14 @@ def format_signal(s: dict) -> str:
     for i, tp in enumerate(s["take_profits"], 1):
         lines.append(f"ئامانجی {i} (TP{i}): {tp:.5f}")
     lines.append(f"RSI: {s['rsi']:.1f}")
+
+    sizing = calculate_position_sizing(s["symbol"], s["price"], s["stop_loss"])
+    if sizing:
+        lines.append(
+            f"قەبارەی پێشنیارکراو: {sizing['lots']:.2f} {sizing['unit_label']} "
+            f"(مەترسی: {sizing['risk_amount']:.2f}$ / {sizing['risk_pct']}%)"
+        )
+
     if s["reasons"]:
         lines.append("هۆکارەکان: " + "، ".join(s["reasons"]))
     lines.append("تێبینی: ئەمە سیگناڵی تەکنیکییە؛ پێش چوونەناوەوە سپرێد و مەترسی بپشکنە.")
