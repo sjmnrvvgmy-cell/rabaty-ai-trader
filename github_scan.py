@@ -45,20 +45,20 @@ def main():
 
     if alerts:
         message = (
-            f"📊 ڕاباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
+            f"📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
             f"🕒 کات: {now_utc}\n\n" + "\n\n".join(alerts)
         )
         send_telegram(message[:3900])
     elif errors:
         message = (
-            f"⚠️ ڕاباتی ئەی ئای ترەیدەر — کێشەی سەرچاوەی داتا\n"
+            f"⚠️ ڕەباتی ئەی ئای ترەیدەر — کێشەی سەرچاوەی داتا\n"
             f"🕒 کات: {now_utc}\n\n" + "\n".join(errors)
         )
         send_telegram(message[:3900])
     else:
         summary = "\n".join(scanned_pairs[:12]) if scanned_pairs else "هیچ جووتێک پشکنینی بۆ نەکرا."
         message = (
-            f"🟢 ڕاباتی ئەی ئای ترەیدەر — چالاکە (هیچ هەلی کڕین/فرۆشتن نییە)\n"
+            f"🟢 ڕەباتی ئەی ئای ترەیدەر — چالاکە (هیچ هەلی کڕین/فرۆشتن نییە)\n"
             f"🕒 کات: {now_utc}\n\n"
             f"{summary}"
         )
