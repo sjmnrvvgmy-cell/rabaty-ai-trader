@@ -3,41 +3,60 @@ from datetime import datetime, timezone
 import requests
 
 
-def fetch_okx_last_price(symbol: str) -> float | None:
-    """هێنانی نرخی ئەو کاتەی دراو یان کانزا لە OKX."""
+def fetch_okx_closed_close(symbol: str, bar: str = "1H") -> float | None:
+    """هێنانی نرخی داخرانی کۆتا شمعەی داخراو لە OKX."""
     inst_id = symbol.strip().upper().replace("/", "-")
-    url = "https://www.okx.com/api/v5/market/ticker"
+    url = "https://www.okx.com/api/v5/market/candles"
     try:
-        resp = requests.get(url, params={"instId": inst_id}, timeout=10)
+        resp = requests.get(
+            url,
+            params={"instId": inst_id, "bar": bar, "limit": "2"},
+            timeout=10,
+        )
         resp.raise_for_status()
         data = resp.json()
-        items = data.get("data") or []
-        if not items:
-            return None
-        return float(items[0]["last"])
+        candles = data.get("data") or []
+        if len(candles) >= 2 and len(candles[1]) >= 5:
+            return float(candles[1][4])
+        if candles and len(candles[0]) >= 5:
+            return float(candles[0][4])
+        return None
     except Exception:
         return None
 
 
-def fetch_binance_last_price(symbol: str) -> float | None:
-    """هێنانی نرخی ئەو کاتەی دراو یان کانزا لە Binance."""
+def fetch_binance_closed_close(symbol: str, interval: str = "1h") -> float | None:
+    """هێنانی نرخی داخرانی کۆتا شمعەی داخراو لە Binance."""
     pair = symbol.strip().upper().replace("/", "").replace("-", "")
-    url = "https://api.binance.com/api/v3/ticker/price"
+    url = "https://api.binance.com/api/v3/klines"
     try:
-        resp = requests.get(url, params={"symbol": pair}, timeout=10)
+        resp = requests.get(
+            url,
+            params={"symbol": pair, "interval": interval, "limit": 2},
+            timeout=10,
+        )
         resp.raise_for_status()
-        data = resp.json()
-        return float(data["price"])
+        klines = resp.json()
+        if len(klines) >= 2 and len(klines[0]) >= 5:
+            return float(klines[0][4])
+        if klines and len(klines[0]) >= 5:
+            return float(klines[0][4])
+        return None
     except Exception:
         return None
 
 
-def get_live_price(symbol: str) -> float | None:
-    """هێنانی نرخی ئەو کاتە سەرەتا لە OKX و ئەگەر نەبوو لە Binance."""
-    price = fetch_okx_last_price(symbol)
+def get_accurate_chart_price(symbol: str, fallback_entry: float | None = None) -> float | None:
+    """هێنانی نرخی شمعەی داخراو سەرەتا لە OKX و ئەگەر نەبوو لە Binance."""
+    price = fetch_okx_closed_close(symbol, bar="1H")
     if price is not None:
         return price
-    return fetch_binance_last_price(symbol)
+
+    price = fetch_binance_closed_close(symbol, interval="1h")
+    if price is not None:
+        return price
+
+    return fallback_entry
 
 
 def format_price(price: float | None) -> str:
@@ -70,7 +89,7 @@ def build_signal_block(
     return (
         f"🗓️ بەروار و کاتی سیگناڵ: {date_str} | {time_12h} | 💰 نرخی ئەو کاتە: {live_price_str}\n"
         f"🔴 {symbol} — {side_label}\n"
-        f"تایمفرێم: 15m | خاڵ: 3\n"
+        f"تایمفرێم: 1h | خاڵ: 3\n"
         f"نرخی چوونەژوورەوە: {format_price(entry)}\n"
         f"ستۆپ لۆس (SL): {format_price(sl)}\n"
         f"ئامانجی 1 (TP1): {format_price(tp1)}\n"
@@ -96,7 +115,7 @@ def build_full_message(signals: list[dict]) -> str:
 
     blocks = [header]
     for item in signals:
-        live_price = get_live_price(item["symbol"])
+        live_price = get_accurate_chart_price(item["symbol"], fallback_entry=item.get("entry"))
         block = build_signal_block(
             symbol=item["symbol"],
             side_label=item["side_label"],
@@ -117,7 +136,7 @@ def build_full_message(signals: list[dict]) -> str:
 
 
 def send_telegram_message(text: str) -> None:
-    """ناردنی نامە بۆ تێلێگرام (ئەگەر تۆکن و چات ئایدی هەبن لە کۆنسۆڵیش چاپ دەکات)."""
+    """ناردنی نامە بۆ تێلێگرام."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
