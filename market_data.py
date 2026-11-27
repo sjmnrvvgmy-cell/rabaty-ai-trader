@@ -1,21 +1,30 @@
+import json
+import os
 import ccxt
 import pandas as pd
+import requests
 import yfinance as yf
 
-_KRAKEN_EXCHANGE = None
+_EXCHANGES: dict[str, object] = {}
 
 
-def _get_kraken():
-    global _KRAKEN_EXCHANGE
-    if _KRAKEN_EXCHANGE is None:
-        ex = ccxt.kraken({"enableRateLimit": True})
+def _get_exchange(name: str):
+    key = name.lower()
+    if key not in _EXCHANGES:
+        if key == "binance":
+            ex = ccxt.binance({"enableRateLimit": True})
+        elif key == "okx":
+            ex = ccxt.okx({"enableRateLimit": True})
+        elif key == "kraken":
+            ex = ccxt.kraken({"enableRateLimit": True})
+        else:
+            raise ValueError(f"Unsupported exchange: {name}")
         ex.load_markets()
-        _KRAKEN_EXCHANGE = ex
-    return _KRAKEN_EXCHANGE
+        _EXCHANGES[key] = ex
+    return _EXCHANGES[key]
 
 
-def _resolve_kraken_symbol(symbol: str) -> str | None:
-    ex = _get_kraken()
+def _resolve_ccxt_symbol(ex, symbol: str) -> str | None:
     clean = symbol.strip().upper()
     if clean in ex.markets:
         return clean
@@ -24,36 +33,21 @@ def _resolve_kraken_symbol(symbol: str) -> str | None:
         base, quote = clean.split("/", 1)
         candidates = [f"{base}/{quote}"]
         if quote == "USDT":
-            candidates.extend([f"{base}/USD", f"{base}/EUR"])
+            candidates.extend([f"{base}/USD", f"{base}/USDC"])
         elif quote == "USD":
-            candidates.extend([f"{base}/USDT", f"{base}/EUR"])
+            candidates.extend([f"{base}/USDT", f"{base}/USDC"])
         for cand in candidates:
             if cand in ex.markets:
                 return cand
     else:
-        for quote in ("USD", "USDT", "EUR"):
+        for quote in ("USDT", "USD", "USDC"):
             if clean.endswith(quote) and len(clean) > len(quote):
                 base = clean[: -len(quote)]
-                for q in (quote, "USD", "USDT"):
+                for q in (quote, "USDT", "USD"):
                     cand = f"{base}/{q}"
                     if cand in ex.markets:
                         return cand
     return None
-
-
-def _map_kraken_timeframe(timeframe: str) -> tuple[str, str | None]:
-    tf = timeframe.strip().lower()
-    mapping = {
-        "1m": ("1m", None),
-        "5m": ("5m", None),
-        "15m": ("15m", None),
-        "30m": ("30m", None),
-        "1h": ("1h", None),
-        "4h": ("1h", "4h"),
-        "1d": ("1d", None),
-        "1w": ("1w", None),
-    }
-    return mapping.get(tf, ("15m", None))
 
 
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -68,26 +62,82 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return out.astype(float)
 
 
-def kraken_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 250) -> pd.DataFrame:
-    market_symbol = _resolve_kraken_symbol(symbol)
-    if not market_symbol:
-        raise ValueError(f"{symbol} not found on Kraken.")
+def _map_ccxt_tf(timeframe: str) -> tuple[str, str | None]:
+    tf = timeframe.strip().lower()
+    mapping = {
+        "1m": ("1m", None),
+        "5m": ("5m", None),
+        "15m": ("15m", None),
+        "30m": ("30m", None),
+        "1h": ("1h", None),
+        "4h": ("1h", "4h"),
+        "1d": ("1d", None),
+        "1w": ("1w", None),
+    }
+    return mapping.get(tf, ("15m", None))
 
-    ex = _get_kraken()
-    raw_tf, resample_rule = _map_kraken_timeframe(timeframe)
+
+def exchange_ohlcv(exchange_name: str, symbol: str, timeframe: str = "15m", limit: int = 250) -> pd.DataFrame:
+    ex = _get_exchange(exchange_name)
+    market_symbol = _resolve_ccxt_symbol(ex, symbol)
+    if not market_symbol:
+        raise ValueError(f"{symbol} not found on {exchange_name}.")
+
+    raw_tf, resample_rule = _map_ccxt_tf(timeframe)
     fetch_limit = limit * 5 if resample_rule else limit
-    rows = ex.fetch_ohlcv(market_symbol, timeframe=raw_tf, limit=min(fetch_limit, 720))
+    rows = ex.fetch_ohlcv(market_symbol, timeframe=raw_tf, limit=min(fetch_limit, 500))
     if not rows:
-        raise ValueError(f"No candle data returned for {symbol} ({market_symbol}).")
+        raise ValueError(f"No candle data returned from {exchange_name} for {symbol}.")
 
     df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.set_index("timestamp").astype(float)
-
     if resample_rule:
         df = _resample_ohlcv(df, resample_rule)
-
     return df.tail(limit)
+
+
+def _mt5_feed_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 250) -> pd.DataFrame | None:
+    """
+    داتای مۆمەکان لە MT5 دەخوێنێتەوە ئەگەر لە ڕێگەی سکریپتی ویندۆزەوە
+    لە state/mt5_feed.json یان MT5_FEED_URL پاشەکەوت کرابێت.
+    فۆرماتی چاوەڕوانکراو: {"XAU/USD": {"15m": [[ts_ms, o, h, l, c, v], ...]}}
+    """
+    payload = None
+    feed_url = os.environ.get("MT5_FEED_URL", "").strip()
+    feed_file = os.environ.get("MT5_FEED_FILE", "state/mt5_feed.json").strip()
+
+    try:
+        if feed_url:
+            resp = requests.get(feed_url, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+        elif feed_file and os.path.exists(feed_file):
+            with open(feed_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    sym_keys = [symbol.strip().upper(), symbol.strip().upper().replace("/", "")]
+    sym_block = None
+    for k in sym_keys:
+        if k in payload and isinstance(payload[k], dict):
+            sym_block = payload[k]
+            break
+
+    if not sym_block:
+        return None
+
+    rows = sym_block.get(timeframe.strip().lower())
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    return df.set_index("timestamp").astype(float).tail(limit)
 
 
 def _yf_candidates(symbol: str) -> list[str]:
@@ -156,6 +206,13 @@ def yf_ohlcv(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
 
 def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
     s = symbol.strip().upper()
+    tf = timeframe.strip().lower()
+
+    # ١. ئەگەر داتای MT5 بەردەست بوو، لە پێش هەموو شت بەکار دەهێنرێت
+    mt5_df = _mt5_feed_ohlcv(s, tf)
+    if mt5_df is not None and not mt5_df.empty:
+        return mt5_df
+
     fx_or_metals = {
         "EUR/USD",
         "GBP/USD",
@@ -170,9 +227,13 @@ def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
         "XPD/USD",
     }
     if s in fx_or_metals or s.endswith("=X") or s.endswith("=F"):
-        return yf_ohlcv(s, timeframe)
+        return yf_ohlcv(s, tf)
 
-    if _resolve_kraken_symbol(s):
-        return kraken_ohlcv(s, timeframe)
+    # ٢. بۆ کریپتۆکان: سەرەتا Binance، پاشان OKX، پاشان Kraken
+    for ex_name in ("binance", "okx", "kraken"):
+        try:
+            return exchange_ohlcv(ex_name, s, tf)
+        except Exception:
+            continue
 
-    return yf_ohlcv(s, timeframe)
+    return yf_ohlcv(s, tf)
