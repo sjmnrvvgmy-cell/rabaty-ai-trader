@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timezone
 import ccxt
 import pandas as pd
 import requests
@@ -98,11 +99,6 @@ def exchange_ohlcv(exchange_name: str, symbol: str, timeframe: str = "15m", limi
 
 
 def _mt5_feed_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 250) -> pd.DataFrame | None:
-    """
-    داتای مۆمەکان لە MT5 دەخوێنێتەوە ئەگەر لە ڕێگەی سکریپتی ویندۆزەوە
-    لە state/mt5_feed.json یان MT5_FEED_URL پاشەکەوت کرابێت.
-    فۆرماتی چاوەڕوانکراو: {"XAU/USD": {"15m": [[ts_ms, o, h, l, c, v], ...]}}
-    """
     payload = None
     feed_url = os.environ.get("MT5_FEED_URL", "").strip()
     feed_file = os.environ.get("MT5_FEED_FILE", "state/mt5_feed.json").strip()
@@ -143,9 +139,9 @@ def _mt5_feed_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 250) -> pd
 def _yf_candidates(symbol: str) -> list[str]:
     s = symbol.strip().upper()
     if s == "XAU/USD":
-        return ["XAUUSD=X", "GC=F"]
+        return ["GC=F", "XAUUSD=X"]
     if s == "XAG/USD":
-        return ["XAGUSD=X", "SI=F"]
+        return ["SI=F", "XAGUSD=X"]
     if "/" in s:
         base, quote = s.split("/", 1)
         return [f"{base}{quote}=X", f"{base}-{quote}"]
@@ -159,24 +155,26 @@ def _yf_params(timeframe: str) -> tuple[str, str, str | None]:
     if tf == "1m":
         return "5d", "1m", None
     if tf == "5m":
-        return "30d", "5m", None
+        return "5d", "5m", None
     if tf == "15m":
-        return "60d", "15m", None
+        return "10d", "15m", None
     if tf == "30m":
-        return "60d", "30m", None
+        return "10d", "30m", None
     if tf == "1h":
-        return "90d", "60m", None
+        return "30d", "60m", None
     if tf == "4h":
-        return "180d", "60m", "4h"
+        return "60d", "60m", "4h"
     if tf == "1d":
-        return "2y", "1d", None
+        return "1y", "1d", None
     if tf == "1w":
         return "5y", "1wk", None
-    return "60d", "15m", None
+    return "10d", "15m", None
 
 
 def yf_ohlcv(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
     period, interval, resample_rule = _yf_params(timeframe)
+    now_utc = datetime.now(timezone.utc)
+    best_df: pd.DataFrame | None = None
 
     for ticker in _yf_candidates(symbol):
         data = yf.download(
@@ -199,7 +197,19 @@ def yf_ohlcv(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
                     clean = clean[["open", "high", "low", "close", "volume"]].astype(float)
                     if resample_rule:
                         clean = _resample_ohlcv(clean, resample_rule)
-                    return clean.tail(250)
+                    clean = clean.tail(250)
+                    if best_df is None:
+                        best_df = clean
+                    last_ts = clean.index[-1].to_pydatetime()
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=timezone.utc)
+                    age_hours = (now_utc - last_ts).total_seconds() / 3600.0
+                    # ئەگەر داتاکە تازە بوو (کەمتر لە 12 کاتژمێر کۆن بێت)، هەر ئەوە دەگەڕێنێتەوە
+                    if age_hours <= 12.0:
+                        return clean
+
+    if best_df is not None and not best_df.empty:
+        return best_df
 
     raise ValueError(f"No Yahoo Finance candle data found for {symbol} ({timeframe}).")
 
@@ -208,7 +218,6 @@ def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
     s = symbol.strip().upper()
     tf = timeframe.strip().lower()
 
-    # ١. ئەگەر داتای MT5 بەردەست بوو، لە پێش هەموو شت بەکار دەهێنرێت
     mt5_df = _mt5_feed_ohlcv(s, tf)
     if mt5_df is not None and not mt5_df.empty:
         return mt5_df
@@ -229,7 +238,6 @@ def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
     if s in fx_or_metals or s.endswith("=X") or s.endswith("=F"):
         return yf_ohlcv(s, tf)
 
-    # ٢. بۆ کریپتۆکان: سەرەتا Binance، پاشان OKX، پاشان Kraken
     for ex_name in ("binance", "okx", "kraken"):
         try:
             return exchange_ohlcv(ex_name, s, tf)
