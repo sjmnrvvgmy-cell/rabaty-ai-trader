@@ -1,202 +1,176 @@
-import os
 import numpy as np
 import pandas as pd
 
 
-def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+def _compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi.fillna(50.0)
 
 
-def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    prev = df["close"].shift(1)
+def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    prev_close = df["close"].astype(float).shift(1)
     tr = pd.concat(
         [
-            df["high"] - df["low"],
-            (df["high"] - prev).abs(),
-            (df["low"] - prev).abs(),
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
         ],
         axis=1,
     ).max(axis=1)
-    return tr.rolling(period).mean()
+    return tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean().bfill()
 
 
-def calculate_position_sizing(symbol: str, entry: float, sl: float) -> dict | None:
-    balance_raw = os.getenv("ACCOUNT_BALANCE", "").strip()
-    if not balance_raw:
-        return None
+def analyze(df: pd.DataFrame, symbol: str, timeframe: str = "15m", min_score: int = 3) -> dict:
+    if df is None or len(df) < 60:
+        return {"action": "WAIT", "symbol": symbol, "timeframe": timeframe, "score": 0}
 
-    try:
-        balance = float(balance_raw)
-        risk_pct = float(os.getenv("RISK_PERCENT", "1.0"))
-    except ValueError:
-        return None
+    data = df.copy()
+    for col in ("open", "high", "low", "close"):
+        data[col] = data[col].astype(float)
 
-    stop_dist = abs(float(entry) - float(sl))
-    if balance <= 0 or risk_pct <= 0 or stop_dist <= 0:
-        return None
+    close = data["close"]
+    high = data["high"]
+    low = data["low"]
 
-    risk_amount = balance * (risk_pct / 100.0)
-    sym = symbol.upper()
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    rsi = _compute_rsi(close, 14)
+    atr = _compute_atr(data, 14)
 
-    if sym.endswith("/USDT"):
-        units = risk_amount / stop_dist
-        contract_size = float(os.getenv("CRYPTO_LOT_SIZE", "1.0"))
-        lots = units / contract_size if contract_size > 0 else units
-        unit_label = (
-            f"Lot (1 Lot = {contract_size:g} {sym.split('/')[0]})"
-            if contract_size != 1.0
-            else f"{sym.split('/')[0]} Units"
-        )
+    last_close = float(close.iloc[-1])
+    last_ema20 = float(ema20.iloc[-1])
+    last_ema50 = float(ema50.iloc[-1])
+    last_rsi = float(rsi.iloc[-1])
+    last_atr = float(atr.iloc[-1])
+
+    if not np.isfinite(last_atr) or last_atr <= 0:
+        last_atr = max(last_close * 0.005, 1e-6)
+
+    prev_high_max = float(high.iloc[-21:-1].max())
+    prev_low_min = float(low.iloc[-21:-1].min())
+
+    bull_reasons: list[str] = []
+    bear_reasons: list[str] = []
+    bull_score = 0
+    bear_score = 0
+
+    if last_close > last_ema20 and last_ema20 >= last_ema50:
+        bull_score += 2
+        bull_reasons.append("مەیلی EMA سەرەوەیە")
+    elif last_close < last_ema20 and last_ema20 <= last_ema50:
+        bear_score += 2
+        bear_reasons.append("مەیلی EMA خوارەوەیە")
+
+    if last_rsi >= 55.0:
+        bull_score += 1
+        bull_reasons.append("زەبری RSI پاڵپشتی کڕینە")
+    elif last_rsi <= 45.0:
+        bear_score += 1
+        bear_reasons.append("زەبری RSI پاڵپشتی فرۆشتنە")
+
+    if last_close > prev_high_max:
+        bull_score += 1
+        bull_reasons.append("شکاندنی بەرزایی پێشوو (BOS سەرەوە)")
+    elif last_close < prev_low_min:
+        bear_score += 1
+        bear_reasons.append("شکاندنی نزمترین نرخی پێشوو (BOS خوارەوە)")
+
+    # پشکنینی Fair Value Gap (FVG) لە دوایین 3 مۆمدا
+    if len(data) >= 3:
+        h_3 = float(high.iloc[-3])
+        l_3 = float(low.iloc[-3])
+        h_1 = float(high.iloc[-1])
+        l_1 = float(low.iloc[-1])
+        if l_1 > h_3:
+            bull_score += 1
+            bull_reasons.append("دروستبوونی FVG سەرەوە")
+        elif h_1 < l_3:
+            bear_score += 1
+            bear_reasons.append("دروستبوونی FVG خوارەوە")
+
+    decimals = 5 if last_close < 10 else 2
+    candle_time = str(data.index[-1])
+
+    if bull_score >= min_score and bull_score > bear_score:
+        sl = max(last_close - (1.2 * last_atr), 1e-8)
+        risk = max(last_close - sl, 1e-8)
+        tp1 = last_close + (1.0 * risk)
+        tp2 = last_close + (1.7 * risk)
+        tp3 = last_close + (2.3 * risk)
         return {
-            "risk_amount": risk_amount,
-            "risk_pct": risk_pct,
-            "lots": lots,
-            "unit_label": unit_label,
+            "action": "BUY",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "score": bull_score,
+            "entry": round(last_close, decimals),
+            "sl": round(sl, decimals),
+            "tp1": round(tp1, decimals),
+            "tp2": round(tp2, decimals),
+            "tp3": round(tp3, decimals),
+            "rsi": round(last_rsi, 1),
+            "reasons": bull_reasons,
+            "candle_time": candle_time,
+            "decimals": decimals,
         }
 
-    if sym.startswith("XAU"):
-        default_contract = 100.0
-    elif sym.startswith("XAG"):
-        default_contract = 5000.0
+    if bear_score >= min_score and bear_score > bull_score:
+        sl = last_close + (1.2 * last_atr)
+        risk = max(sl - last_close, 1e-8)
+        tp1 = max(last_close - (1.0 * risk), 1e-8)
+        tp2 = max(last_close - (1.7 * risk), 1e-8)
+        tp3 = max(last_close - (2.3 * risk), 1e-8)
+        return {
+            "action": "SELL",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "score": bear_score,
+            "entry": round(last_close, decimals),
+            "sl": round(sl, decimals),
+            "tp1": round(tp1, decimals),
+            "tp2": round(tp2, decimals),
+            "tp3": round(tp3, decimals),
+            "rsi": round(last_rsi, 1),
+            "reasons": bear_reasons,
+            "candle_time": candle_time,
+            "decimals": decimals,
+        }
+
+    return {"action": "WAIT", "symbol": symbol, "timeframe": timeframe, "score": max(bull_score, bear_score)}
+
+
+def format_signal(sig: dict) -> str:
+    action = str(sig.get("action", "WAIT")).upper()
+    symbol = sig.get("symbol", "")
+    tf = sig.get("timeframe", "")
+    score = sig.get("score", 0)
+    decimals = int(sig.get("decimals", 5))
+    fmt = f"{{:.{decimals}f}}"
+
+    if action == "BUY":
+        badge = "🟢"
+        side_text = "کڕین (BUY)"
     else:
-        default_contract = 100000.0
+        badge = "🔴"
+        side_text = "فرۆشتن (SELL)"
 
-    contract_size = float(os.getenv("CONTRACT_SIZE", str(default_contract)))
-    lots = risk_amount / (stop_dist * contract_size) if contract_size > 0 else 0.0
-
-    return {
-        "risk_amount": risk_amount,
-        "risk_pct": risk_pct,
-        "lots": lots,
-        "unit_label": "Lot",
-    }
-
-
-def analyze(df: pd.DataFrame, symbol: str, timeframe: str, min_score: int = 3) -> dict:
-    """Rule-based short-term signal engine. Not financial advice or a guarantee."""
-    if len(df) < 60:
-        raise ValueError("At least 60 candles are required for analysis.")
-
-    d = df.copy()
-    d["ema20"] = d.close.ewm(span=20, adjust=False).mean()
-    d["ema50"] = d.close.ewm(span=50, adjust=False).mean()
-    d["rsi"] = _rsi(d.close)
-    d["atr"] = _atr(d)
-
-    last = d.iloc[-1]
-    recent = d.iloc[-16:-1] if timeframe in ("5m", "15m") else d.iloc[-21:-1]
-
-    score_buy = 0
-    score_sell = 0
-    reasons_buy, reasons_sell = [], []
-
-    if last.close > last.ema20 > last.ema50:
-        score_buy += 1
-        reasons_buy.append("مەیلی EMA سەرەوەیە")
-    if last.close < last.ema20 < last.ema50:
-        score_sell += 1
-        reasons_sell.append("مەیلی EMA خوارەوەیە")
-
-    if 50 <= last.rsi <= 72:
-        score_buy += 1
-        reasons_buy.append("زەبری RSI پاڵپشتی کڕینە")
-    if 28 <= last.rsi <= 50:
-        score_sell += 1
-        reasons_sell.append("زەبری RSI پاڵپشتی فرۆشتنە")
-
-    if last.close > recent.high.max():
-        score_buy += 2
-        reasons_buy.append("شکاندنی بەرزایی پێشوو (BOS سەرەوە)")
-    if last.close < recent.low.min():
-        score_sell += 2
-        reasons_sell.append("شکاندنی نزمترین نرخی پێشوو (BOS خوارەوە)")
-
-    prior_high, prior_low = recent.high.max(), recent.low.min()
-    if last.high > prior_high and last.close < prior_high:
-        score_sell += 1
-        reasons_sell.append("ڕاماڵینی سیولەی سەرەوە (Liquidity Sweep)")
-    if last.low < prior_low and last.close > prior_low:
-        score_buy += 1
-        reasons_buy.append("ڕاماڵینی سیولەی خوارەوە (Liquidity Sweep)")
-
-    if len(d) >= 3 and d.low.iloc[-1] > d.high.iloc[-3]:
-        score_buy += 1
-        reasons_buy.append("دروستبوونی FVG سەرەوە")
-    if len(d) >= 3 and d.high.iloc[-1] < d.low.iloc[-3]:
-        score_sell += 1
-        reasons_sell.append("دروستبوونی FVG خوارەوە")
-
-    atr = float(last.atr) if pd.notna(last.atr) else float((d.high - d.low).tail(14).mean())
-    price = float(last.close)
-    if not np.isfinite(atr) or atr <= 0:
-        raise ValueError("ATR unavailable; cannot calculate risk levels.")
-
-    sl_mult = 1.2 if timeframe in ("5m", "15m") else 1.5
-
-    if score_buy >= min_score and score_buy > score_sell:
-        side, score, reasons = "BUY", score_buy, reasons_buy
-        sl = price - sl_mult * atr
-        risk = price - sl
-        tps = [price + risk, price + 1.8 * risk, price + 2.5 * risk]
-    elif score_sell >= min_score and score_sell > score_buy:
-        side, score, reasons = "SELL", score_sell, reasons_sell
-        sl = price + sl_mult * atr
-        risk = sl - price
-        tps = [price - risk, price - 1.8 * risk, price - 2.5 * risk]
-    else:
-        side, score, reasons, sl, tps = "WAIT", max(score_buy, score_sell), [], None, []
-
-    return {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "side": side,
-        "price": price,
-        "score": score,
-        "buy_score": score_buy,
-        "sell_score": score_sell,
-        "rsi": float(last.rsi),
-        "atr": atr,
-        "stop_loss": sl,
-        "take_profits": tps,
-        "reasons": reasons,
-        "candle_time": str(d.index[-1]),
-    }
-
-
-def format_signal(s: dict) -> str:
-    if s["side"] == "WAIT":
-        return (
-            f"⏳ {s['symbol']} | {s['timeframe']} — چاوەڕوانی (WAIT)\n"
-            f"نرخ: {s['price']:.5f}\n"
-            f"خاڵ: کڕین {s['buy_score']} / فرۆشتن {s['sell_score']}\n"
-            f"هیچ دەرفەتێکی گونجاو نییە."
-        )
-
-    side_label = "کڕین (BUY)" if s["side"] == "BUY" else "فرۆشتن (SELL)"
-    icon = "🟢" if s["side"] == "BUY" else "🔴"
-
-    lines = [
-        f"{icon} {s['symbol']} — {side_label}",
-        f"تایمفرێم: {s['timeframe']} | خاڵ: {s['score']}",
-        f"نرخی چوونەژوورەوە: {s['price']:.5f}",
-        f"ستۆپ لۆس (SL): {s['stop_loss']:.5f}",
-    ]
-    for i, tp in enumerate(s["take_profits"], 1):
-        lines.append(f"ئامانجی {i} (TP{i}): {tp:.5f}")
-    lines.append(f"RSI: {s['rsi']:.1f}")
-
-    sizing = calculate_position_sizing(s["symbol"], s["price"], s["stop_loss"])
-    if sizing:
-        lines.append(
-            f"قەبارەی پێشنیارکراو: {sizing['lots']:.2f} {sizing['unit_label']} "
-            f"(مەترسی: {sizing['risk_amount']:.2f}$ / {sizing['risk_pct']}%)"
-        )
-
-    if s["reasons"]:
-        lines.append("هۆکارەکان: " + "، ".join(s["reasons"]))
-    lines.append("تێبینی: ئەمە سیگناڵی تەکنیکییە؛ پێش چوونەناوەوە سپرێد و مەترسی بپشکنە.")
-    return "\n".join(lines)
+    reasons_text = "، ".join(sig.get("reasons", []))
+    return (
+        f"{badge} {symbol} — {side_text}\n"
+        f"تایمفرێم: {tf} | خاڵ: {score}\n"
+        f"نرخی چوونەژوورەوە: {fmt.format(float(sig['entry']))}\n"
+        f"ستۆپ لۆس (SL): {fmt.format(float(sig['sl']))}\n"
+        f"ئامانجی 1 (TP1): {fmt.format(float(sig['tp1']))}\n"
+        f"ئامانجی 2 (TP2): {fmt.format(float(sig['tp2']))}\n"
+        f"ئامانجی 3 (TP3): {fmt.format(float(sig['tp3']))}\n"
+        f"RSI: {float(sig['rsi']):.1f}\n"
+        f"هۆکارەکان: {reasons_text}\n"
+        f"تێبینی: ئەمە سیگناڵی تەکنیکییە؛ پێش چوونەناوەوە سپرێد و مەترسی بپشکنە."
+    )
