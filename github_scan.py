@@ -109,4 +109,15 @@ def scan_all() -> None:
 
     if new_blocks:
         header = (
-            "📊 ڕەباتی ئەی
+            "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
+            f"🕒 کات: {utc_header}\n"
+        )
+        full_message = header + "\n" + "\n\n".join(new_blocks)
+        send_telegram(full_message)
+
+    if state_changed:
+        _save_state(state)
+
+
+if __name__ == "__main__":
+    scan_all()
