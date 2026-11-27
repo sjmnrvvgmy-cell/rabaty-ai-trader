@@ -1,0 +1,156 @@
+import os
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+import requests
+
+
+BAGHDAD_TZ = ZoneInfo("Asia/Baghdad")
+
+
+def format_number(val: float | int) -> str:
+    """ڕێکخستنی ژمارە بە شێوەی ڕێک و بێ سیفری زیادە."""
+    if isinstance(val, int):
+        return f"{val:,}"
+    s = f"{val:,.5f}".rstrip("0").rstrip(".")
+    return s
+
+
+def build_signal_block(item: dict, date_str: str, time_12h: str) -> str:
+    """دروستکردنی بلۆکی هەر سیگناڵێک بە هەمان فۆرماتی داواکراو."""
+    entry_str = format_number(item["entry"])
+    sl_str = format_number(item["sl"])
+    tp1_str = format_number(item["tp1"])
+    tp2_str = format_number(item["tp2"])
+    tp3_str = format_number(item["tp3"])
+    rsi_str = f"{float(item['rsi']):.1f}"
+
+    return (
+        f"🗓️ بەروار و کاتی سیگناڵ: {date_str} | {time_12h} | 💰 نرخی ئەو کاتە: {entry_str}\n"
+        f"🔴 {item['symbol']} — {item['side_label']}\n"
+        f"تایمفرێم: {item.get('timeframe', '1h')} | خاڵ: {item.get('score', 3)}\n"
+        f"نرخی چوونەژوورەوە: {entry_str}\n"
+        f"ستۆپ لۆس (SL): {sl_str}\n"
+        f"ئامانجی 1 (TP1): {tp1_str}\n"
+        f"ئامانجی 2 (TP2): {tp2_str}\n"
+        f"ئامانجی 3 (TP3): {tp3_str}\n"
+        f"RSI: {rsi_str}\n"
+        f"هۆکارەکان: {item['reasons']}\n"
+        f"تێبینی: ئەمە سیگناڵی تەکنیکییە؛ پێش چوونەناوەوە سپرێد و مەترسی بپشکنە."
+    )
+
+
+def build_full_message(signals: list[dict]) -> str:
+    """دروستکردنی تەواوی نامەی سیگناڵەکان."""
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(BAGHDAD_TZ)
+
+    utc_header = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    date_str = now_local.strftime("%Y-%m-%d")
+    time_12h = now_local.strftime("%I:%M:%S %p")
+
+    header = (
+        "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
+        f"🕒 کات: {utc_header}"
+    )
+
+    parts = [header]
+    for item in signals:
+        parts.append(build_signal_block(item=item, date_str=date_str, time_12h=time_12h))
+
+    return "\n\n".join(parts)
+
+
+def send_telegram_message(text: str) -> None:
+    """ناردنی نامە بۆ تێلێگرام."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+    print(text)
+
+    if not bot_token or not chat_id:
+        return
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+    resp = requests.post(url, json=payload, timeout=10)
+    resp.raise_for_status()
+
+
+def main() -> None:
+    signals = [
+        {
+            "symbol": "XAUT/USDT",
+            "side_label": "فرۆشتن (SELL)",
+            "timeframe": "1h",
+            "score": 3,
+            "entry": 3620.1,
+            "sl": 3630.31,
+            "tp1": 3609.89,
+            "tp2": 3602.75,
+            "tp3": 3596.62,
+            "rsi": 34.1,
+            "reasons": "مەیلی EMA خوارەوەیە، زەبری RSI پاڵپشتی فرۆشتنە",
+        },
+        {
+            "symbol": "BTC/USDT",
+            "side_label": "فرۆشتن (SELL)",
+            "timeframe": "1h",
+            "score": 3,
+            "entry": 60455.1,
+            "sl": 60924.97,
+            "tp1": 59985.23,
+            "tp2": 59656.32,
+            "tp3": 59374.4,
+            "rsi": 43.4,
+            "reasons": "مەیلی EMA خوارەوەیە، زەبری RSI پاڵپشتی فرۆشتنە",
+        },
+        {
+            "symbol": "ETH/USDT",
+            "side_label": "فرۆشتن (SELL)",
+            "timeframe": "1h",
+            "score": 3,
+            "entry": 1683.41,
+            "sl": 1698.24,
+            "tp1": 1668.58,
+            "tp2": 1658.21,
+            "tp3": 1649.31,
+            "rsi": 39.4,
+            "reasons": "مەیلی EMA خوارەوەیە، زەبری RSI پاڵپشتی فرۆشتنە",
+        },
+        {
+            "symbol": "XRP/USDT",
+            "side_label": "فرۆشتن (SELL)",
+            "timeframe": "1h",
+            "score": 3,
+            "entry": 0.9511,
+            "sl": 0.95842,
+            "tp1": 0.94378,
+            "tp2": 0.93866,
+            "tp3": 0.93427,
+            "rsi": 38.9,
+            "reasons": "مەیلی EMA خوارەوەیە، زەبری RSI پاڵپشتی فرۆشتنە",
+        },
+        {
+            "symbol": "LINK/USDT",
+            "side_label": "فرۆشتن (SELL)",
+            "timeframe": "1h",
+            "score": 3,
+            "entry": 9.351,
+            "sl": 9.434,
+            "tp1": 9.268,
+            "tp2": 9.2099,
+            "tp3": 9.1601,
+            "rsi": 42.6,
+            "reasons": "مەیلی EMA خوارەوەیە، زەبری RSI پاڵپشتی فرۆشتنە",
+        },
+    ]
+
+    message = build_full_message(signals)
+    send_telegram_message(message)
+
+
+if __name__ == "__main__":
+    main()
