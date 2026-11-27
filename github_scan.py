@@ -1,68 +1,74 @@
-from datetime import datetime, timezone
 import os
 import requests
+from dotenv import load_dotenv
+from market_data import get_market_data
+from reversal_monitor import (
+    check_reversals,
+    load_active_signals,
+    record_new_signal,
+    save_active_signals,
+)
 from scanner import scan_all
 from signal_engine import format_signal
+from telegram_commands import handle_incoming_messages
+
+load_dotenv()
 
 
-def send_telegram(text: str):
+def get_allowed_chat_ids() -> list[str]:
+    raw = os.environ.get("TELEGRAM_CHAT_IDS", "").strip()
+    if raw:
+        return [c.strip() for c in raw.split(",") if c.strip()]
+
+    single = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    return [single] if single else []
+
+
+def send_to_chats(chat_ids: list[str], text: str) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        raise ValueError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variable.")
+    if not token or not chat_ids:
+        raise ValueError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_IDS / TELEGRAM_CHAT_ID.")
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    response = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=20)
-    response.raise_for_status()
+    for chat_id in chat_ids:
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=20)
+        resp.raise_for_status()
 
 
-def main():
+def fetch_ohlcv_for_command(symbol: str, timeframe: str):
+    return get_market_data(symbol, timeframe)
+
+
+def main() -> None:
+    chat_ids = get_allowed_chat_ids()
+    if not chat_ids:
+        raise ValueError("هیچ TELEGRAM_CHAT_ID یان TELEGRAM_CHAT_IDS دیاری نەکراوە.")
+
+    # ١. خوێندنەوەی داواکارییە کوردییەکان و وەڵامدانەوەیان
+    handle_incoming_messages(
+        allowed_chat_ids=chat_ids,
+        fetch_df_fn=fetch_ohlcv_for_command,
+        send_fn=lambda msg: send_to_chats(chat_ids, msg),
+    )
+
+    # ٢. پشکنینی خۆکاری بازاڕ، پێچەوانەبوونەوە و ناردنی سیگناڵەکان
     results = scan_all()
-    alerts = []
-    errors = []
-    scanned_pairs = []
+    signals = load_active_signals()
 
-    for s in results:
-        side = s.get("side")
-        symbol = s.get("symbol", "نەزانراو")
-        tf = s.get("timeframe", "")
+    reversal_alerts = check_reversals(results, signals)
+    for alert in reversal_alerts:
+        send_to_chats(chat_ids, alert)
 
-        side_ku = {
-            "BUY": "کڕین (BUY)",
-            "SELL": "فرۆشتن (SELL)",
-            "HOLD": "چاوەڕوانی (HOLD)",
-            "NONE": "بێ سیگناڵ",
-            "ERROR": "هەڵەی داتا",
-        }.get(str(side), str(side))
+    for item in results:
+        if item.get("side") in ("BUY", "SELL"):
+            msg = (
+                "📡 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n\n"
+                + format_signal(item)
+            )
+            send_to_chats(chat_ids, msg)
+            record_new_signal(signals, item)
 
-        scanned_pairs.append(f"• {symbol} ({tf}): {side_ku}")
-
-        if side in ("BUY", "SELL"):
-            alerts.append(format_signal(s))
-        elif side == "ERROR":
-            errors.append(f"• {symbol} {tf}: {str(s.get('error', ''))[:140]}")
-
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    if alerts:
-        message = (
-            f"📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
-            f"🕒 کات: {now_utc}\n\n" + "\n\n".join(alerts)
-        )
-        send_telegram(message[:3900])
-    elif errors:
-        message = (
-            f"⚠️ ڕەباتی ئەی ئای ترەیدەر — کێشەی سەرچاوەی داتا\n"
-            f"🕒 کات: {now_utc}\n\n" + "\n".join(errors)
-        )
-        send_telegram(message[:3900])
-    else:
-        summary = "\n".join(scanned_pairs[:12]) if scanned_pairs else "هیچ جووتێک پشکنینی بۆ نەکرا."
-        message = (
-            f"🟢 ڕەباتی ئەی ئای ترەیدەر — چالاکە (هیچ هەلی کڕین/فرۆشتن نییە)\n"
-            f"🕒 کات: {now_utc}\n\n"
-            f"{summary}"
-        )
-        send_telegram(message[:3900])
+    save_active_signals(signals)
 
 
 if __name__ == "__main__":
