@@ -1,170 +1,139 @@
-import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import requests
-from market_data import get_market_data
-from signal_engine import analyze, format_signal
-
-BAGHDAD_TZ = timezone(timedelta(hours=3))
-STATE_FILE = "state/last_signals.json"
-TELEGRAM_MAX_LEN = 3900
-
-DEFAULT_SYMBOLS = [
-    "XAUT/USDT",
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
-    "XRP/USDT",
-    "LINK/USDT",
-]
-
-DEFAULT_TIMEFRAMES = ["15m", "1h"]
 
 
-def _load_state() -> dict:
-    if not os.path.exists(STATE_FILE):
-        return {}
+def fetch_okx_price(inst_id: str = "BTC-USDT") -> float | None:
+    """هێنانی نرخی ئەو کاتەی دراوەکە لە OKX."""
+    url = "https://www.okx.com/api/v5/market/ticker"
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_state(state: dict) -> None:
-    parent = os.path.dirname(STATE_FILE)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-
-def _split_message(header: str, blocks: list[str], max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
-    messages: list[str] = []
-    current = header.rstrip() + "\n"
-
-    for block in blocks:
-        addition = ("\n" + block) if current.endswith("\n") else ("\n\n" + block)
-        if len(current) + len(addition) > max_len and current.strip() != header.strip():
-            messages.append(current.strip())
-            current = header.rstrip() + "\n\n" + block
-        else:
-            current += addition
-
-    if current.strip():
-        messages.append(current.strip())
-    return messages
-
-
-def send_telegram(text: str) -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_ids_raw = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_ids_raw:
-        raise ValueError("TELEGRAM_BOT_TOKEN یان TELEGRAM_CHAT_ID دیاری نەکراوە.")
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    for chat_id in [c.strip() for c in chat_ids_raw.split(",") if c.strip()]:
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": True,
-            },
-            timeout=20,
-        )
+        resp = requests.get(url, params={"instId": inst_id}, timeout=10)
         resp.raise_for_status()
+        data = resp.json()
+        items = data.get("data") or []
+        if not items:
+            return None
+        return float(items[0]["last"])
+    except Exception:
+        return None
 
 
-def _format_signal_timestamps() -> tuple[str, str]:
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(BAGHDAD_TZ)
-    utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    local_str = now_local.strftime("%Y-%m-%d | %I:%M:%S %p")
-    return utc_str, local_str
-
-
-def _parse_list_env(var_name: str, default: list[str]) -> list[str]:
-    raw = os.environ.get(var_name, "").strip()
-    if not raw:
-        return list(default)
-    items = [item.strip() for item in raw.split(",") if item.strip()]
-    return items if items else list(default)
-
-
-def scan_all() -> None:
-    symbols = _parse_list_env("SCAN_SYMBOLS", DEFAULT_SYMBOLS)
-    timeframes = _parse_list_env("SCAN_TIMEFRAMES", DEFAULT_TIMEFRAMES)
-
+def fetch_binance_price(symbol: str = "BTCUSDT") -> float | None:
+    """هێنانی نرخی ئەو کاتەی دراوەکە لە Binance."""
+    url = "https://api.binance.com/api/v3/ticker/price"
     try:
-        min_score = int(os.environ.get("MIN_SIGNAL_SCORE", "3").strip())
-    except ValueError:
-        min_score = 3
+        resp = requests.get(url, params={"symbol": symbol}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data["price"])
+    except Exception:
+        return None
 
-    state = _load_state()
-    pending_updates: dict[str, str] = {}
-    new_blocks: list[str] = []
 
-    utc_header, local_now_str = _format_signal_timestamps()
+def fetch_metal_price_usd(metal_code: str) -> float | None:
+    """هێنانی نرخی زێڕ (XAU) یان زیو (XAG) بە دۆلار بۆ هەر ئۆنسێک."""
+    code = metal_code.upper().strip()
+    if code not in ("XAU", "XAG", "GOLD", "SILVER"):
+        return None
 
-    for symbol in symbols:
-        for tf in timeframes:
-            try:
-                df = get_market_data(symbol, tf)
-                if df is None or df.empty:
-                    print(f"[{symbol} | {tf}] Empty market data")
-                    continue
+    normalized = "XAU" if code in ("XAU", "GOLD") else "XAG"
+    url = "https://open.er-api.com/v6/latest/USD"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        rates = data.get("rates") or {}
+        rate = rates.get(normalized)
+        if rate is None or float(rate) <= 0:
+            return None
+        return 1.0 / float(rate)
+    except Exception:
+        return None
 
-                sig = analyze(df, symbol=symbol, timeframe=tf, min_score=min_score)
-                if not isinstance(sig, dict):
-                    print(f"[{symbol} | {tf}] Invalid analysis output")
-                    continue
 
-                action = str(sig.get("action", "WAIT")).upper().strip()
-                if action not in ("BUY", "SELL"):
-                    print(f"[{symbol} | {tf}] WAIT")
-                    continue
+def get_live_price(symbol: str = "BTC-USDT") -> float | None:
+    """هێنانی نرخی زێڕ، زیو، یان دراوە کریپتۆکان بەپێی هێماکە."""
+    clean = symbol.strip().upper()
+    clean_no_dash = clean.replace("-", "").replace("/", "")
 
-                candle_id = str(sig.get("candle_time") or df.index[-1])
-                state_key = f"{symbol}_{tf}"
-                marker = f"{action}_{candle_id}"
+    if clean in ("XAU", "XAU-USD", "XAUUSD", "GOLD") or clean_no_dash in ("XAUUSD", "GOLD"):
+        return fetch_metal_price_usd("XAU")
 
-                if state.get(state_key) == marker:
-                    print(f"[{symbol} | {tf}] Already sent for candle {candle_id}")
-                    continue
+    if clean in ("XAG", "XAG-USD", "XAGUSD", "SILVER") or clean_no_dash in ("XAGUSD", "SILVER"):
+        return fetch_metal_price_usd("XAG")
 
-                formatted = format_signal(sig)
-                if not formatted or not str(formatted).strip():
-                    print(f"[{symbol} | {tf}] Empty formatted signal")
-                    continue
+    okx_price = fetch_okx_price(clean)
+    if okx_price is not None:
+        return okx_price
 
-                block = (
-                    f"🗓️ بەروار و کاتی سیگناڵ: {local_now_str}\n"
-                    f"{formatted.strip()}"
-                )
-                new_blocks.append(block)
-                pending_updates[state_key] = marker
-                print(f"[{symbol} | {tf}] Queued {action} signal at {local_now_str}")
+    return fetch_binance_price(clean_no_dash)
 
-            except Exception as e:
-                print(f"[{symbol} | {tf}] Error: {e}")
 
-    if new_blocks:
-        header = (
-            "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
-            f"🕒 کات: {utc_header}"
-        )
-        chunks = _split_message(header, new_blocks)
-        for chunk in chunks:
-            send_telegram(chunk)
+def format_time_and_price(scan_time: str | None, price: float | int | str | None) -> tuple[str, str]:
+    """ڕێکخستنی نرخ و دێڕی کات + نرخ بە شێوازی سەلامەت."""
+    try:
+        price_val = float(price) if price is not None and str(price).strip() != "" else None
+    except (ValueError, TypeError):
+        price_val = None
 
-        state.update(pending_updates)
-        _save_state(state)
-        print(f"Sent {len(new_blocks)} signal(s) in {len(chunks)} message(s).")
-    else:
-        print("No new signals to send.")
+    price_str = f"{price_val:,.4f}".rstrip("0").rstrip(".") if price_val is not None else "N/A"
+    time_str = str(scan_time).strip() if scan_time is not None and str(scan_time).strip() != "" else "N/A"
+    time_and_price = f"🕒 {time_str} | 💰 نرخ: {price_str}"
+    return price_str, time_and_price
+
+
+def build_watchlist_message(symbols: list[str], signal_text: str, scan_time: str) -> str:
+    """دروستکردنی نامەی پشکنین بۆ لیستێک لە دراوەکان، زێڕ، و زیو."""
+    lines = [
+        f"⚡ سیگناڵ: {signal_text}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for sym in symbols:
+        clean_sym = sym.strip().upper()
+        if not clean_sym:
+            continue
+        price = get_live_price(clean_sym)
+        _, time_and_price = format_time_and_price(scan_time, price)
+        lines.append(f"📌 {clean_sym}: {time_and_price}")
+    return "\n".join(lines)
+
+
+def send_telegram_message(text: str) -> None:
+    """ناردنی نامە بۆ تێلێگرام ئەگەر TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID دانرابن."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+    if not bot_token or not chat_id:
+        print("تێبینی: TELEGRAM_BOT_TOKEN یان TELEGRAM_CHAT_ID دیاری نەکراوە؛ نامەکە لە کۆنسۆڵ پیشان دەدرێت:")
+        print(text)
+        return
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+    resp = requests.post(url, json=payload, timeout=10)
+    resp.raise_for_status()
+
+
+def run_scan(
+    symbols: list[str] | None = None,
+    signal_text: str = "پشکنینی خۆکار (5m)",
+) -> None:
+    """ڕاکێشانی پشکنین بۆ لیستەی دراوەکان و زێڕ و زیو و ناردنی ئەنجام."""
+    target_symbols = symbols or ["BTC-USDT", "ETH-USDT", "XAU", "XAG"]
+    scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    message = build_watchlist_message(
+        symbols=target_symbols,
+        signal_text=signal_text,
+        scan_time=scan_time,
+    )
+    send_telegram_message(message)
 
 
 if __name__ == "__main__":
-    scan_all()
+    raw_symbols = os.getenv("SCAN_SYMBOLS", "BTC-USDT,ETH-USDT,XAU,XAG")
+    parsed_symbols = [s.strip() for s in raw_symbols.split(",") if s.strip()]
+    target_signal = os.getenv("SCAN_SIGNAL", "پشکنینی خۆکار (5m)").strip() or "پشکنینی خۆکار (5m)"
+    run_scan(symbols=parsed_symbols, signal_text=target_signal)
