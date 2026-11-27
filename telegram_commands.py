@@ -190,18 +190,19 @@ def handle_incoming_messages(allowed_chat_ids: list[str], fetch_df_fn, send_fn) 
             sig = analyze(df, symbol=symbol, timeframe=tf, min_score=min_score)
             live_price = sig.get("price")
             price_str = f"{live_price:.5f}" if isinstance(live_price, (int, float)) else str(live_price)
+            candle_time = sig.get("candle_time", "نادیار")
 
             reply = (
-                f"📩 سیگناڵی داواکراو تەنها بۆ ({symbol} | {tf})\n"
-                f"🕒 {req_time_str}\n"
-                f"⏱️ کاتی وەرگرتنی نرخ: {fetch_local}\n"
-                f"💲 نرخی ئەو ساتە: {price_str}\n\n"
+                f"📩 شیکاریی داواکراو بۆ ({symbol} | {tf})\n"
+                f"🕒 کاتی وەرگرتنی داتا: {fetch_local}\n"
+                f"🕯️ کاتی دوایین مۆم: {candle_time}\n"
+                f"💲 نرخی دوایین مۆم لە سەرچاوە: {price_str}\n\n"
                 + format_signal(sig)
             )
         except Exception as e:
             reply = (
                 f"⚠️ نەتوانرا شیکاری بۆ {symbol} ({tf}) بکرێت\n"
-                f"🕒 {req_time_str}\n"
+                f"🕒 کات: {fetch_local}\n"
                 f"هۆکار: {e}"
             )
 
