@@ -1,61 +1,72 @@
+import csv
+import io
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import requests
 
 
-def fetch_okx_closed_close(symbol: str, bar: str = "1H") -> float | None:
-    """هێنانی نرخی داخرانی کۆتا شمعەی داخراو لە OKX."""
-    inst_id = symbol.strip().upper().replace("/", "-")
-    url = "https://www.okx.com/api/v5/market/candles"
+BAGHDAD_TZ = ZoneInfo("Asia/Baghdad")
+
+
+def symbol_to_stooq(symbol: str) -> str | None:
+    """گۆڕینی هێمای سیگناڵ بۆ هێمای هاوشێوەی بازاڕ لە Stooq."""
+    clean = symbol.strip().upper().replace("/", "").replace("-", "")
+    mapping = {
+        "XAUTUSDT": "xauusd",
+        "XAUUSDT": "xauusd",
+        "XAUUSD": "xauusd",
+        "XAU": "xauusd",
+        "GOLD": "xauusd",
+        "XAGUSDT": "xagusd",
+        "XAGUSD": "xagusd",
+        "XAG": "xagusd",
+        "SILVER": "xagusd",
+        "BTCUSDT": "btcusd",
+        "BTCUSD": "btcusd",
+        "ETHUSDT": "ethusd",
+        "ETHUSD": "ethusd",
+        "XRPUSDT": "xrpusd",
+        "XRPUSD": "xrpusd",
+        "LINKUSDT": "linkusd",
+        "LINKUSD": "linkusd",
+    }
+    if clean in mapping:
+        return mapping[clean]
+    if clean.endswith("USDT") and len(clean) > 4:
+        return (clean[:-4] + "USD").lower()
+    return clean.lower() if clean else None
+
+
+def fetch_stooq_price(symbol: str) -> float | None:
+    """هێنانی کۆتا نرخ لە Stooq بەبێ بەکارهێنانی Binance یان OKX."""
+    stooq_sym = symbol_to_stooq(symbol)
+    if not stooq_sym:
+        return None
+
+    url = f"https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcv&h&e=csv"
     try:
-        resp = requests.get(
-            url,
-            params={"instId": inst_id, "bar": bar, "limit": "2"},
-            timeout=10,
-        )
+        resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        candles = data.get("data") or []
-        if len(candles) >= 2 and len(candles[1]) >= 5:
-            return float(candles[1][4])
-        if candles and len(candles[0]) >= 5:
-            return float(candles[0][4])
-        return None
-    except Exception:
-        return None
-
-
-def fetch_binance_closed_close(symbol: str, interval: str = "1h") -> float | None:
-    """هێنانی نرخی داخرانی کۆتا شمعەی داخراو لە Binance."""
-    pair = symbol.strip().upper().replace("/", "").replace("-", "")
-    url = "https://api.binance.com/api/v3/klines"
-    try:
-        resp = requests.get(
-            url,
-            params={"symbol": pair, "interval": interval, "limit": 2},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        klines = resp.json()
-        if len(klines) >= 2 and len(klines[0]) >= 5:
-            return float(klines[0][4])
-        if klines and len(klines[0]) >= 5:
-            return float(klines[0][4])
-        return None
-    except Exception:
+        reader = csv.DictReader(io.StringIO(resp.text))
+        row = next(reader, None)
+        if not row:
+            return None
+        close_val = (row.get("Close") or "").strip()
+        if not close_val or close_val.upper() in ("N/D", "NONE"):
+            return None
+        price = float(close_val)
+        return price if price > 0 else None
+    except Exception as exc:
+        print(f"Debug [{symbol} -> {stooq_sym}] Stooq error: {exc}")
         return None
 
 
-def get_accurate_chart_price(symbol: str, fallback_entry: float | None = None) -> float | None:
-    """هێنانی نرخی شمعەی داخراو سەرەتا لە OKX و ئەگەر نەبوو لە Binance."""
-    price = fetch_okx_closed_close(symbol, bar="1H")
+def get_market_price(symbol: str, fallback_entry: float | None = None) -> float | None:
+    """هێنانی نرخ لە سەرچاوەی بازاڕ (بێ Binance و OKX)؛ ئەگەر نەبوو نرخی سیگناڵەکە بەکاردەهێنێت."""
+    price = fetch_stooq_price(symbol)
     if price is not None:
         return price
-
-    price = fetch_binance_closed_close(symbol, interval="1h")
-    if price is not None:
-        return price
-
     return fallback_entry
 
 
@@ -104,9 +115,11 @@ def build_signal_block(
 def build_full_message(signals: list[dict]) -> str:
     """کۆکردنەوەی هەموو سیگناڵەکان لە یەک نامەی ڕێکخراودا."""
     now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(BAGHDAD_TZ)
+
     utc_header = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    date_str = now_utc.strftime("%Y-%m-%d")
-    time_12h = now_utc.strftime("%I:%M:%S %p")
+    date_str = now_local.strftime("%Y-%m-%d")
+    time_12h = now_local.strftime("%I:%M:%S %p")
 
     header = (
         "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
@@ -115,7 +128,7 @@ def build_full_message(signals: list[dict]) -> str:
 
     blocks = [header]
     for item in signals:
-        live_price = get_accurate_chart_price(item["symbol"], fallback_entry=item.get("entry"))
+        live_price = get_market_price(item["symbol"], fallback_entry=item.get("entry"))
         block = build_signal_block(
             symbol=item["symbol"],
             side_label=item["side_label"],
