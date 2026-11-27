@@ -14,7 +14,8 @@ def fetch_okx_price(inst_id: str = "BTC-USDT") -> float | None:
         if not items:
             return None
         return float(items[0]["last"])
-    except Exception:
+    except Exception as exc:
+        print(f"Debug [{inst_id}] OKX error: {exc}")
         return None
 
 
@@ -26,29 +27,48 @@ def fetch_binance_price(symbol: str = "BTCUSDT") -> float | None:
         resp.raise_for_status()
         data = resp.json()
         return float(data["price"])
-    except Exception:
+    except Exception as exc:
+        print(f"Debug [{symbol}] Binance error: {exc}")
         return None
 
 
 def fetch_metal_price_usd(metal_code: str) -> float | None:
-    """هێنانی نرخی زێڕ (XAU) یان زیو (XAG) بە دۆلار بۆ هەر ئۆنسێک."""
+    """هێنانی نرخی زێڕ (XAU) یان زیو (XAG) بە دۆلار بۆ هەر ئۆنسێک لە چەند سەرچاوەیەکەوە."""
     code = metal_code.upper().strip()
-    if code not in ("XAU", "XAG", "GOLD", "SILVER"):
+    if code in ("XAU", "GOLD"):
+        target = "xau"
+    elif code in ("XAG", "SILVER"):
+        target = "xag"
+    else:
         return None
 
-    normalized = "XAU" if code in ("XAU", "GOLD") else "XAG"
-    url = "https://open.er-api.com/v6/latest/USD"
+    # سەرچاوەی یەکەم: open.er-api.com
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        rates = data.get("rates") or {}
-        rate = rates.get(normalized)
-        if rate is None or float(rate) <= 0:
-            return None
-        return 1.0 / float(rate)
-    except Exception:
-        return None
+        rate = (resp.json().get("rates") or {}).get(target.upper())
+        if rate is not None and float(rate) > 0:
+            return 1.0 / float(rate)
+    except Exception as exc:
+        print(f"Debug [{target.upper()}] er-api error: {exc}")
+
+    # سەرچاوەی دووەم: fawazahmed0 currency-api (USD -> XAU/XAG)
+    urls = [
+        "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",
+        "https://latest.currency-api.pages.dev/v1/currencies/usd.json",
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            usd_map = (resp.json().get("usd") or {})
+            rate = usd_map.get(target)
+            if rate is not None and float(rate) > 0:
+                return 1.0 / float(rate)
+        except Exception as exc:
+            print(f"Debug [{target.upper()}] fallback error ({url}): {exc}")
+
+    return None
 
 
 def get_live_price(symbol: str = "BTC-USDT") -> float | None:
