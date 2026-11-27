@@ -20,7 +20,7 @@ def _get_exchange(name: str):
 
 def _symbol_candidates(symbol: str) -> list[str]:
     clean = symbol.strip().upper().replace("-", "/")
-    if clean in ("XAU/USD", "XAUUSD", "GOLD"):
+    if clean in ("XAU/USD", "XAUUSD", "GOLD", "XAUT/USDT"):
         return ["XAUT/USDT", "PAXG/USDT", "PAXG/USD", "XAU/USDT"]
     if clean in ("XAG/USD", "XAGUSD", "SILVER"):
         return ["XAG/USDT", "XAG/USD"]
