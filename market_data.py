@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from datetime import datetime, timezone
@@ -136,6 +137,61 @@ def _mt5_feed_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 250) -> pd
     return df.set_index("timestamp").astype(float).tail(limit)
 
 
+def _stooq_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 250) -> pd.DataFrame | None:
+    s = symbol.strip().upper().replace("/", "")
+    stooq_map = {
+        "XAUUSD": "xauusd",
+        "XAGUSD": "xagusd",
+        "EURUSD": "eurusd",
+        "GBPUSD": "gbpusd",
+        "USDJPY": "usdjpy",
+        "USDCHF": "usdchf",
+        "AUDUSD": "audusd",
+        "USDCAD": "usdcad",
+        "NZDUSD": "nzdusd",
+    }
+    code = stooq_map.get(s)
+    if not code:
+        return None
+
+    tf = timeframe.strip().lower()
+    interval_code = "d" if tf in ("1d", "1w") else "15"
+    url = f"https://stooq.com/q/d/l/?s={code}&i={interval_code}" if interval_code == "d" else f"https://stooq.com/q/l/?s={code}&f=sd2t2ohlcv&h&e=csv"
+
+    try:
+        resp = requests.get(url, timeout=12)
+        resp.raise_for_status()
+        text = resp.text.strip()
+        if not text or "<html" in text.lower():
+            return None
+        df = pd.read_csv(io.StringIO(text))
+        if df.empty:
+            return None
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        if "date" in df.columns and "time" in df.columns:
+            dt = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str), utc=True, errors="coerce")
+        elif "date" in df.columns:
+            dt = pd.to_datetime(df["date"].astype(str), utc=True, errors="coerce")
+        else:
+            return None
+        df["timestamp"] = dt
+        df = df.dropna(subset=["timestamp", "open", "high", "low", "close"])
+        if df.empty:
+            return None
+        if "volume" not in df.columns:
+            df["volume"] = 0.0
+        out = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].astype(float)
+        if tf == "4h":
+            out = _resample_ohlcv(out, "4h")
+        elif tf == "1h":
+            out = _resample_ohlcv(out, "1h")
+        elif tf == "1w":
+            out = _resample_ohlcv(out, "1W")
+        return out.tail(limit)
+    except Exception:
+        return None
+
+
 def _yf_candidates(symbol: str) -> list[str]:
     s = symbol.strip().upper()
     if s == "XAU/USD":
@@ -177,13 +233,16 @@ def yf_ohlcv(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
     best_df: pd.DataFrame | None = None
 
     for ticker in _yf_candidates(symbol):
-        data = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-        )
+        try:
+            data = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+            )
+        except Exception:
+            continue
         if data is not None and not data.empty:
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)
@@ -204,7 +263,6 @@ def yf_ohlcv(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
                     if last_ts.tzinfo is None:
                         last_ts = last_ts.replace(tzinfo=timezone.utc)
                     age_hours = (now_utc - last_ts).total_seconds() / 3600.0
-                    # ئەگەر داتاکە تازە بوو (کەمتر لە 12 کاتژمێر کۆن بێت)، هەر ئەوە دەگەڕێنێتەوە
                     if age_hours <= 12.0:
                         return clean
 
@@ -236,6 +294,9 @@ def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
         "XPD/USD",
     }
     if s in fx_or_metals or s.endswith("=X") or s.endswith("=F"):
+        stooq_df = _stooq_ohlcv(s, tf)
+        if stooq_df is not None and not stooq_df.empty:
+            return stooq_df
         return yf_ohlcv(s, tf)
 
     for ex_name in ("binance", "okx", "kraken"):
@@ -243,5 +304,9 @@ def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
             return exchange_ohlcv(ex_name, s, tf)
         except Exception:
             continue
+
+    stooq_df = _stooq_ohlcv(s, tf)
+    if stooq_df is not None and not stooq_df.empty:
+        return stooq_df
 
     return yf_ohlcv(s, tf)
