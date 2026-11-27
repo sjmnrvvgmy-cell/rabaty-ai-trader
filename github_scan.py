@@ -8,12 +8,89 @@ BAGHDAD_TZ = ZoneInfo("Asia/Baghdad")
 
 
 def format_exact_price(val: float | int) -> str:
-    """نیشاندانی نرخ بە 5 خاڵی دەیی ڕێک وەک سیگناڵە دەقیقەکەی سەرەوە."""
+    """نیشاندانی نرخ بە 5 خاڵی دەیی."""
     return f"{float(val):.5f}"
 
 
+def fetch_okx_price(symbol: str, bar: str = "1H") -> float | None:
+    """هێنانی نرخ لە OKX بەپێی تایمفرێم."""
+    inst_id = symbol.strip().upper().replace("/", "-")
+    url = "https://www.okx.com/api/v5/market/candles"
+    try:
+        resp = requests.get(
+            url,
+            params={"instId": inst_id, "bar": bar, "limit": "2"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        candles = (resp.json().get("data") or [])
+        if len(candles) >= 2 and len(candles[1]) >= 5:
+            return float(candles[1][4])
+        if candles and len(candles[0]) >= 5:
+            return float(candles[0][4])
+        return None
+    except Exception:
+        return None
+
+
+def fetch_binance_price(symbol: str, interval: str = "1h") -> float | None:
+    """هێنانی نرخ لە Binance بەپێی تایمفرێم."""
+    pair = symbol.strip().upper().replace("/", "").replace("-", "")
+    url = "https://api.binance.com/api/v3/klines"
+    try:
+        resp = requests.get(
+            url,
+            params={"symbol": pair, "interval": interval, "limit": 2},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        klines = resp.json()
+        if len(klines) >= 2 and len(klines[0]) >= 5:
+            return float(klines[0][4])
+        if klines and len(klines[0]) >= 5:
+            return float(klines[0][4])
+        return None
+    except Exception:
+        return None
+
+
+def get_live_price_for_signal(item: dict) -> float:
+    """هەوڵ دەدات نرخی ئەو کاتە بهێنێت؛ ئەگەر نەبوو نرخی ناو سیگناڵەکە بەکاردەهێنێت."""
+    symbol = item["symbol"]
+    tf = item.get("timeframe", "1h").lower()
+
+    okx_bar = "1H" if tf == "1h" else "15m"
+    bn_interval = "1h" if tf == "1h" else "15m"
+
+    price = fetch_okx_price(symbol, bar=okx_bar)
+    if price is not None and price > 0:
+        return price
+
+    price = fetch_binance_price(symbol, interval=bn_interval)
+    if price is not None and price > 0:
+        return price
+
+    return float(item["entry"])
+
+
+def compute_levels_from_price(entry: float, is_buy: bool = True) -> tuple[float, float, float, float]:
+    """حیسابکردنی SL و TP1/TP2/TP3 بە شێوەی هاوسەنگ لەسەر بنەمای نرخی چوونەژوورەوە."""
+    step = max(entry * 0.005, 0.0005)
+    if is_buy:
+        sl = round(entry - step, 5)
+        tp1 = round(entry + step, 5)
+        tp2 = round(entry + step * 1.8, 5)
+        tp3 = round(entry + step * 2.5, 5)
+    else:
+        sl = round(entry + step, 5)
+        tp1 = round(entry - step, 5)
+        tp2 = round(entry - step * 1.8, 5)
+        tp3 = round(entry - step * 2.5, 5)
+    return sl, tp1, tp2, tp3
+
+
 def pick_active_signal(signals: list[dict], now_local: datetime) -> dict:
-    """هەڵبژاردنی تەنها یەک سیگناڵی تەواو کە لەو کاتەدا بەردەستە."""
+    """هەڵبژاردنی تەنها یەک سیگناڵی بەردەست لەو کاتەدا."""
     if not signals:
         raise ValueError("هیچ سیگناڵێک لە لیستەکەدا نییە.")
     idx = now_local.hour % len(signals)
@@ -26,135 +103,9 @@ def build_single_signal_message(item: dict, now_utc: datetime, now_local: dateti
     date_str = now_local.strftime("%Y-%m-%d")
     time_12h = now_local.strftime("%I:%M:%S %p")
 
-    entry_val = item["entry"]
-    request_price_val = item.get("request_price")
-    current_price_str = format_exact_price(
-        request_price_val if request_price_val is not None else entry_val
-    )
+    current_price = get_live_price_for_signal(item)
+    is_buy = "BUY" in item.get("side_label", "BUY").upper() or "کڕین" in item.get("side_label", "")
+    sl, tp1, tp2, tp3 = compute_levels_from_price(current_price, is_buy=is_buy)
 
-    entry_str = format_exact_price(entry_val)
-    sl_str = format_exact_price(item["sl"])
-    tp1_str = format_exact_price(item["tp1"])
-    tp2_str = format_exact_price(item["tp2"])
-    tp3_str = format_exact_price(item["tp3"])
-    rsi_str = f"{float(item['rsi']):.1f}"
-
-    side_emoji = item.get("emoji", "🟢")
-    timeframe = item.get("timeframe", "1h")
-    score = item.get("score", 4)
-
-    header = (
-        "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
-        f"🕒 کات: {utc_header}"
-    )
-
-    block = (
-        f"🗓️ بەروار و کاتی سیگناڵ: {date_str} | {time_12h} | 💰 نرخی ئەو کاتە: {current_price_str}\n"
-        f"{side_emoji} {item['symbol']} — {item['side_label']}\n"
-        f"تایمفرێم: {timeframe} | خاڵ: {score}\n"
-        f"نرخی چوونەژوورەوە: {entry_str}\n"
-        f"ستۆپ لۆس (SL): {sl_str}\n"
-        f"ئامانجی 1 (TP1): {tp1_str}\n"
-        f"ئامانجی 2 (TP2): {tp2_str}\n"
-        f"ئامانجی 3 (TP3): {tp3_str}\n"
-        f"RSI: {rsi_str}\n"
-        f"هۆکارەکان: {item['reasons']}\n"
-        f"تێبینی: ئەمە سیگناڵی تەکنیکییە؛ پێش چوونەناوەوە سپرێد و مەترسی بپشکنە."
-    )
-
-    return f"{header}\n\n{block}"
-
-
-def send_telegram_message(text: str) -> None:
-    """ناردنی نامە بۆ تێلێگرام."""
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-
-    print(text)
-
-    if not bot_token or not chat_id:
-        return
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-    resp = requests.post(url, json=payload, timeout=10)
-    resp.raise_for_status()
-
-
-def main() -> None:
-    signals = [
-        {
-            "symbol": "XAUT/USDT",
-            "side_label": "کڕین (BUY)",
-            "emoji": "🟢",
-            "timeframe": "1h",
-            "score": 4,
-            "entry": 3667.50000,
-            "request_price": None,
-            "sl": 3645.86786,
-            "tp1": 3689.13214,
-            "tp2": 3706.43786,
-            "tp3": 3721.58036,
-            "rsi": 78.6,
-            "reasons": "مەیلی EMA سەرەوەیە، شکاندنی بەرزایی پێشوو (BOS سەرەوە)، دروستبوونی FVG سەرەوە",
-        },
-        {
-            "symbol": "USD/JPY",
-            "side_label": "کڕین (BUY)",
-            "emoji": "🟢",
-            "timeframe": "15m",
-            "score": 4,
-            "entry": 159.42400,
-            "request_price": None,
-            "sl": 159.34848,
-            "tp1": 159.49951,
-            "tp2": 159.55992,
-            "tp3": 159.61278,
-            "rsi": 68.5,
-            "reasons": "مەیلی EMA سەرەوەیە، زەبری RSI پاڵپشتی کڕینە، شکاندنی بەرزایی پێشوو (BOS سەرەوە)",
-        },
-        {
-            "symbol": "USD/JPY",
-            "side_label": "کڕین (BUY)",
-            "emoji": "🟢",
-            "timeframe": "1h",
-            "score": 4,
-            "entry": 159.42400,
-            "request_price": None,
-            "sl": 159.29017,
-            "tp1": 159.55782,
-            "tp2": 159.66488,
-            "tp3": 159.75856,
-            "rsi": 62.5,
-            "reasons": "مەیلی EMA سەرەوەیە، زەبری RSI پاڵپشتی کڕینە، شکاندنی بەرزایی پێشوو (BOS سەرەوە)",
-        },
-        {
-            "symbol": "USD/CHF",
-            "side_label": "کڕین (BUY)",
-            "emoji": "🟢",
-            "timeframe": "1h",
-            "score": 4,
-            "entry": 0.83608,
-            "request_price": None,
-            "sl": 0.83473,
-            "tp1": 0.83743,
-            "tp2": 0.83851,
-            "tp3": 0.83946,
-            "rsi": 66.7,
-            "reasons": "زەبری RSI پاڵپشتی کڕینە، شکاندنی بەرزایی پێشوو (BOS سەرەوە)، دروستبوونی FVG سەرەوە",
-        },
-    ]
-
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(BAGHDAD_TZ)
-
-    active_signal = pick_active_signal(signals, now_local)
-    message = build_single_signal_message(active_signal, now_utc=now_utc, now_local=now_local)
-    send_telegram_message(message)
-
-
-if __name__ == "__main__":
-    main()
+    current_price_str = format_exact_price(current_price)
+    entry_str = format_exact_price(current_
