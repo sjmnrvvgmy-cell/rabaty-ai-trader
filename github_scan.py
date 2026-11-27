@@ -8,17 +8,19 @@ from signal_engine import analyze, format_signal
 BAGHDAD_TZ = timezone(timedelta(hours=3))
 STATE_FILE = "state/last_signals.json"
 
-# لیستی ئەو جووتانەی دەتەوێت هەر 5 خولەک جارێک پشکنینیان بۆ بکرێت
 DEFAULT_SYMBOLS = [
-    "PAXG/USDT",  # زێڕ لە Binance/OKX
+    "XAUT/USDT",
+    "GBP/USD",
+    "USD/JPY",
+    "AUD/USD",
     "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
     "XRP/USDT",
+    "LINK/USDT",
 ]
 
-# ئەو تایمفرێمانەی دەتەوێت پشکنینیان تێدا بکرێت
-DEFAULT_TIMEFRAMES = ["5m", "15m"]
+DEFAULT_TIMEFRAMES = ["15m", "1h"]
 
 
 def _load_state() -> dict:
@@ -55,9 +57,12 @@ def send_telegram(text: str) -> None:
         resp.raise_for_status()
 
 
-def _current_datetime_str() -> str:
-    now_local = datetime.now(BAGHDAD_TZ)
-    return now_local.strftime("%Y-%m-%d | %I:%M:%S %p")
+def _format_signal_timestamps() -> tuple[str, str]:
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(BAGHDAD_TZ)
+    utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    local_str = now_local.strftime("%Y-%m-%d | %I:%M:%S %p")
+    return utc_str, local_str
 
 
 def scan_all() -> None:
@@ -70,6 +75,9 @@ def scan_all() -> None:
     min_score = int(os.environ.get("MIN_SIGNAL_SCORE", "3"))
     state = _load_state()
     state_changed = False
+    new_blocks: list[str] = []
+
+    utc_header, local_now_str = _format_signal_timestamps()
 
     for symbol in symbols:
         for tf in timeframes:
@@ -86,24 +94,29 @@ def scan_all() -> None:
                 state_key = f"{symbol}_{tf}"
                 last_sent = state.get(state_key)
 
-                # ڕێگری لە ناردنەوەی هەمان سیگناڵ لەسەر هەمان مۆم
                 if last_sent == f"{action}_{candle_id}":
                     print(f"[{symbol} | {tf}] Already sent for candle {candle_id}")
                     continue
 
-                now_str = _current_datetime_str()
-                msg = (
-                    f"📅 بەروار و کات: {now_str}\n"
-                    f"📊 جووت: {symbol} ({tf})\n\n"
-                    + format_signal(sig)
+                block = (
+                    f"🗓️ بەروار و کاتی سیگناڵ: {local_now_str}\n"
+                    f"{format_signal(sig)}"
                 )
-                send_telegram(msg)
+                new_blocks.append(block)
                 state[state_key] = f"{action}_{candle_id}"
                 state_changed = True
-                print(f"[{symbol} | {tf}] Sent {action} signal at {now_str}")
+                print(f"[{symbol} | {tf}] Queued {action} signal at {local_now_str}")
 
             except Exception as e:
                 print(f"[{symbol} | {tf}] Error: {e}")
+
+    if new_blocks:
+        header = (
+            "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
+            f"🕒 کات: {utc_header}\n"
+        )
+        full_message = header + "\n" + "\n\n".join(new_blocks)
+        send_telegram(full_message)
 
     if state_changed:
         _save_state(state)
