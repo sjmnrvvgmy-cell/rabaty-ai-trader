@@ -83,7 +83,6 @@ def analyze(df: pd.DataFrame, symbol: str, timeframe: str = "15m", min_score: in
         bear_score += 1
         bear_reasons.append("شکاندنی نزمترین نرخی پێشوو (BOS خوارەوە)")
 
-    # پشکنینی Fair Value Gap (FVG) لە دوایین 3 مۆمدا
     if len(data) >= 3:
         h_3 = float(high.iloc[-3])
         l_3 = float(low.iloc[-3])
