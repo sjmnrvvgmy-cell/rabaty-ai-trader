@@ -7,10 +7,10 @@ _EXCHANGES: dict[str, object] = {}
 def _get_exchange(name: str):
     key = name.strip().lower()
     if key not in _EXCHANGES:
-        if key == "binance":
-            ex = ccxt.binance({"enableRateLimit": True})
-        elif key == "okx":
+        if key == "okx":
             ex = ccxt.okx({"enableRateLimit": True})
+        elif key == "binance":
+            ex = ccxt.binance({"enableRateLimit": True})
         else:
             raise ValueError(f"Unsupported exchange: {name}")
         ex.load_markets()
@@ -21,7 +21,7 @@ def _get_exchange(name: str):
 def _symbol_candidates(symbol: str) -> list[str]:
     clean = symbol.strip().upper().replace("-", "/")
     if clean in ("XAU/USD", "XAUUSD", "GOLD"):
-        return ["PAXG/USDT", "XAUT/USDT", "PAXG/USD", "XAU/USDT"]
+        return ["XAUT/USDT", "PAXG/USDT", "PAXG/USD", "XAU/USDT"]
     if clean in ("XAG/USD", "XAGUSD", "SILVER"):
         return ["XAG/USDT", "XAG/USD"]
 
@@ -98,7 +98,7 @@ def exchange_ohlcv(exchange_name: str, symbol: str, timeframe: str = "15m", limi
 
 def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
     errors: list[str] = []
-    for ex_name in ("binance", "okx"):
+    for ex_name in ("okx", "binance"):
         try:
             df = exchange_ohlcv(ex_name, symbol, timeframe)
             if df is not None and not df.empty:
@@ -106,4 +106,4 @@ def get_market_data(symbol: str, timeframe: str = "15m") -> pd.DataFrame:
         except Exception as e:
             errors.append(f"{ex_name}: {e}")
 
-    raise ValueError(f"Could not fetch {symbol} ({timeframe}) from Binance or OKX. Details: {' | '.join(errors)}")
+    raise ValueError(f"Could not fetch {symbol} ({timeframe}) from OKX or Binance. Details: {' | '.join(errors)}")
