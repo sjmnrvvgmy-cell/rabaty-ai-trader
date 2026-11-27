@@ -14,17 +14,38 @@ def format_number(val: float | int) -> str:
     return f"{val:,.5f}".rstrip("0").rstrip(".")
 
 
-def build_signal_block(item: dict, date_str: str, time_12h: str) -> str:
-    """دروستکردنی بلۆکی هەر سیگناڵێک بە هەمان فۆرماتی داواکراو."""
-    entry_str = format_number(item["entry"])
+def pick_active_signal(signals: list[dict], now_local: datetime) -> dict:
+    """هەڵبژاردنی تەنها یەک سیگناڵی تەواو کە لەو کاتەدا بەردەستە."""
+    if not signals:
+        raise ValueError("هیچ سیگناڵێک لە لیستەکەدا نییە.")
+    idx = now_local.hour % len(signals)
+    return signals[idx]
+
+
+def build_single_signal_message(item: dict, now_utc: datetime, now_local: datetime) -> str:
+    """دروستکردنی نامەی تەنها یەک سیگناڵ بە نرخی ئەو کاتەی داواکارییەکە دەکرێت."""
+    utc_header = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    date_str = now_local.strftime("%Y-%m-%d")
+    time_12h = now_local.strftime("%I:%M:%S %p")
+
+    entry_val = item["entry"]
+    request_price_val = item.get("request_price")
+    current_price_str = format_number(request_price_val if request_price_val is not None else entry_val)
+
+    entry_str = format_number(entry_val)
     sl_str = format_number(item["sl"])
     tp1_str = format_number(item["tp1"])
     tp2_str = format_number(item["tp2"])
     tp3_str = format_number(item["tp3"])
     rsi_str = f"{float(item['rsi']):.1f}"
 
-    return (
-        f"🗓️ بەروار و کاتی سیگناڵ: {date_str} | {time_12h} | 💰 نرخی ئەو کاتە: {entry_str}\n"
+    header = (
+        "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
+        f"🕒 کات: {utc_header}"
+    )
+
+    block = (
+        f"🗓️ بەروار و کاتی سیگناڵ: {date_str} | {time_12h} | 💰 نرخی ئەو کاتە: {current_price_str}\n"
         f"🔴 {item['symbol']} — {item['side_label']}\n"
         f"تایمفرێم: {item.get('timeframe', '1h')} | خاڵ: {item.get('score', 3)}\n"
         f"نرخی چوونەژوورەوە: {entry_str}\n"
@@ -37,26 +58,7 @@ def build_signal_block(item: dict, date_str: str, time_12h: str) -> str:
         f"تێبینی: ئەمە سیگناڵی تەکنیکییە؛ پێش چوونەناوەوە سپرێد و مەترسی بپشکنە."
     )
 
-
-def build_full_message(signals: list[dict]) -> str:
-    """دروستکردنی تەواوی نامەی سیگناڵەکان."""
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(BAGHDAD_TZ)
-
-    utc_header = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    date_str = now_local.strftime("%Y-%m-%d")
-    time_12h = now_local.strftime("%I:%M:%S %p")
-
-    header = (
-        "📊 ڕەباتی ئەی ئای ترەیدەر (RABATY AI TRADER) — سیگناڵی نوێ\n"
-        f"🕒 کات: {utc_header}"
-    )
-
-    parts = [header]
-    for item in signals:
-        parts.append(build_signal_block(item=item, date_str=date_str, time_12h=time_12h))
-
-    return "\n\n".join(parts)
+    return f"{header}\n\n{block}"
 
 
 def send_telegram_message(text: str) -> None:
@@ -86,6 +88,7 @@ def main() -> None:
             "timeframe": "1h",
             "score": 3,
             "entry": 3620.1,
+            "request_price": None,
             "sl": 3630.31,
             "tp1": 3609.89,
             "tp2": 3602.75,
@@ -99,6 +102,7 @@ def main() -> None:
             "timeframe": "1h",
             "score": 3,
             "entry": 60455.1,
+            "request_price": None,
             "sl": 60924.97,
             "tp1": 59985.23,
             "tp2": 59656.32,
@@ -112,6 +116,7 @@ def main() -> None:
             "timeframe": "1h",
             "score": 3,
             "entry": 1683.41,
+            "request_price": None,
             "sl": 1698.24,
             "tp1": 1668.58,
             "tp2": 1658.21,
@@ -125,6 +130,7 @@ def main() -> None:
             "timeframe": "1h",
             "score": 3,
             "entry": 0.9511,
+            "request_price": None,
             "sl": 0.95842,
             "tp1": 0.94378,
             "tp2": 0.93866,
@@ -138,6 +144,7 @@ def main() -> None:
             "timeframe": "1h",
             "score": 3,
             "entry": 9.351,
+            "request_price": None,
             "sl": 9.434,
             "tp1": 9.268,
             "tp2": 9.2099,
@@ -147,7 +154,11 @@ def main() -> None:
         },
     ]
 
-    message = build_full_message(signals)
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(BAGHDAD_TZ)
+
+    active_signal = pick_active_signal(signals, now_local)
+    message = build_single_signal_message(active_signal, now_utc=now_utc, now_local=now_local)
     send_telegram_message(message)
 
 
